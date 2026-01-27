@@ -18,20 +18,14 @@ st.set_page_config(
 # --- Helper: Text Processing ---
 def clean_and_split_sentences(text):
     """Splits text into sentences and cleans them."""
-    # Split by standard sentence delimiters (improved regex)
-    # Matches . ? ! followed by space, or newlines
     sentences = re.split(r'(?<!\w\.\w.)(?<![A-Z][a-z]\.)(?<=\.|\?|\!)\s+|\n+', text)
-    # Remove empty strings and very short sentences
     sentences = [s.strip() for s in sentences if len(s.strip()) > 10]
     return sentences
 
 # --- Helper: Embedding (The Semantic Space) ---
 @st.cache_resource
 def load_embedding_model():
-    """
-    Loads a lightweight Sentence Transformer model.
-    Using 'all-MiniLM-L6-v2' for speed and efficiency.
-    """
+    """Loads a lightweight Sentence Transformer model."""
     try:
         from sentence_transformers import SentenceTransformer
         return SentenceTransformer('all-MiniLM-L6-v2')
@@ -45,25 +39,18 @@ def get_embeddings(sentences, model):
         
     if model:
         embeddings = model.encode(sentences)
-        # Normalize embeddings to unit length for Cosine Similarity
         norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-        # Avoid division by zero
         norms[norms == 0] = 1
         return embeddings / norms
     else:
-        # Fallback: TF-IDF if sentence-transformers is missing
         from sklearn.feature_extraction.text import TfidfVectorizer
         vectorizer = TfidfVectorizer()
         embeddings = vectorizer.fit_transform(sentences).toarray()
         return embeddings
 
 # --- Core Math: Determinantal Point Process ---
-
 def build_kernel_matrix(embeddings, alpha=1.0):
-    """
-    Constructs the DPP Kernel Matrix (L).
-    L_ij = Similarity(i, j) * Quality(i) * Quality(j)
-    """
+    """Constructs the DPP Kernel Matrix (L)."""
     if len(embeddings) == 0:
         return np.array([[]])
     similarity_matrix = np.dot(embeddings, embeddings.T)
@@ -89,7 +76,6 @@ def dpp_greedy_selection(kernel_matrix, k):
             current_subset = selected_indices + [item]
             submatrix = kernel_matrix[np.ix_(current_subset, current_subset)]
             try:
-                # Regularize diagonal
                 d = np.linalg.det(submatrix + np.eye(len(current_subset)) * 1e-6)
                 score = np.log(d) if d > 0 else -np.inf
             except np.linalg.LinAlgError:
@@ -127,56 +113,37 @@ def calculate_compression_ratio(sentences):
     return cr, uncompressed_size, compressed_size
 
 def novascore_calculation(target_embeddings, reference_embeddings, weights=None, threshold=0.15):
-    """
-    Calculates NovAScore using vector similarity with Iterative Self-Comparison.
-    
-    Args:
-        threshold (float): Novelty Threshold (0.0 - 1.0). 
-                           Similarities below (1 - threshold) are ignored (treated as 0.0).
-                           Lower threshold -> Higher Ignore Cutoff -> More Forgiving.
-    
-    Returns:
-        novelty_scores: Array of novelty scores (0.0 to 1.0)
-        weighted_score: Single weighted average score
-        match_data: List of tuples (match_type, match_index) indicating where the closest match was found.
-                    match_type is 'ref', 'self', or 'none'.
-    """
+    """Calculates NovAScore using vector similarity with Iterative Self-Comparison."""
     num_target = len(target_embeddings)
     if num_target == 0:
         return np.array([]), 0.0, []
 
-    # Initialize tracking
     max_sim_ref = np.zeros(num_target)
     ref_match_indices = np.full(num_target, -1, dtype=int)
     
     max_sim_self = np.zeros(num_target)
     self_match_indices = np.full(num_target, -1, dtype=int)
 
-    # 1. Compare against Reference History (if exists)
     if reference_embeddings is not None and len(reference_embeddings) > 0:
         sim_vs_ref = np.dot(target_embeddings, reference_embeddings.T)
         max_sim_ref = np.max(sim_vs_ref, axis=1)
         ref_match_indices = np.argmax(sim_vs_ref, axis=1)
 
-    # 2. Iterative Self-Comparison (Target vs Previous Target)
     sim_vs_self = np.dot(target_embeddings, target_embeddings.T)
     
     for i in range(1, num_target):
-        # Compare unit i against all previous units 0...i-1
         previous_sims = sim_vs_self[i, :i]
         if len(previous_sims) > 0:
             max_sim_self[i] = np.max(previous_sims)
             self_match_indices[i] = np.argmax(previous_sims)
             
-    # 3. Combine: Find best match source (Ref or Self)
     final_max_sim = np.zeros(num_target)
-    match_data = [] # Stores (type, index)
+    match_data = []
 
     for i in range(num_target):
         score_ref = max_sim_ref[i]
         score_self = max_sim_self[i]
         
-        # Determine which source is more similar (closer match)
         if score_ref >= score_self:
             final_max_sim[i] = score_ref
             if ref_match_indices[i] != -1:
@@ -187,23 +154,12 @@ def novascore_calculation(target_embeddings, reference_embeddings, weights=None,
             final_max_sim[i] = score_self
             match_data.append(('self', self_match_indices[i]))
 
-    # --- Forgiveness Logic (Noise Gate) ---
-    # User Request: Decrease Threshold -> More Forgiving.
-    # We interpret threshold as "Novelty Threshold".
-    # If Novelty Threshold is 0.2, we ignore similarity unless it's very high (Sim > 0.8).
-    # If Novelty Threshold is 0.8, we ignore similarity only if it's very low (Sim < 0.2).
-    
     similarity_cutoff = 1.0 - threshold
-    
-    # If similarity is below the cutoff, we treat it as "Noise" (0.0 Similarity -> 1.0 Novelty)
-    # This makes the metric forgiving for partial matches.
     final_max_sim[final_max_sim < similarity_cutoff] = 0.0
     
-    # Novelty is the inverse of similarity
     novelty_scores = 1 - final_max_sim
     novelty_scores = np.clip(novelty_scores, 0, 1)
     
-    # Calculate Weighted NovAScore
     if weights is None:
         weights = np.ones(num_target)
         
@@ -212,7 +168,6 @@ def novascore_calculation(target_embeddings, reference_embeddings, weights=None,
     return novelty_scores, weighted_score, match_data
 
 # --- Embedding Visualization Helpers ---
-
 def reduce_dimensions(embeddings, method='pca', n_components=2):
     """Reduce embedding dimensions for visualization."""
     if len(embeddings) < 2:
@@ -232,29 +187,22 @@ def reduce_dimensions(embeddings, method='pca', n_components=2):
     return embeddings
 
 def get_word_embeddings(sentence, model):
-    """
-    Get individual word embeddings and their contributions to the sentence.
-    Uses a simple approach: embed each word separately and compare to sentence embedding.
-    """
+    """Get individual word embeddings and their contributions to the sentence."""
     if model is None:
         return None, None, None
     
-    # Tokenize into words
     words = re.findall(r'\b\w+\b', sentence.lower())
     if len(words) == 0:
         return None, None, None
     
-    # Get sentence embedding
     sentence_emb = model.encode([sentence])[0]
     sentence_emb = sentence_emb / (np.linalg.norm(sentence_emb) + 1e-9)
     
-    # Get word embeddings
     word_embs = model.encode(words)
     norms = np.linalg.norm(word_embs, axis=1, keepdims=True)
     norms[norms == 0] = 1
     word_embs = word_embs / norms
     
-    # Calculate contribution (similarity to sentence embedding)
     contributions = np.dot(word_embs, sentence_emb)
     
     return words, word_embs, contributions
@@ -267,41 +215,97 @@ def calculate_word_similarity_matrix(words1, embs1, words2, embs2):
     return similarity
 
 # --- Ollama Integration ---
-def decompose_with_ollama(text, model="qwen:8b", base_url="http://localhost:11434"):
+def decompose_with_ollama(text, model="qwen3:8b", base_url="http://localhost:11434", timeout=120):
     """
-    Connects to a local Ollama instance to decompose text.
-    Uses 'Atomic Content Units' design.
+    Connects to a local Ollama instance to decompose text into ACUs.
     """
-    prompt = f"""
-    Task: Decompose the following text into a list of Atomic Content Units (ACUs). 
-    An ACU is a short, standalone statement containing a single piece of information.
-    Output ONLY a valid JSON list of strings. Do not add any conversational text.
+    # Validate input
+    if not text or not text.strip():
+        st.warning("⚠️ Empty input text. Cannot extract ACUs.")
+        return []
     
-    Text: "{text[:3000]}"
-    """
+    clean_text = text.strip()[:3000]
+    
+    # Simple, direct prompt - works better with qwen3
+    prompt = f"""/no_think
+Break down the following text into Atomic Content Units (ACUs).
+Each ACU should be a single, simple fact that cannot be broken down further.
+Return ONLY a JSON array of strings like: ["fact 1", "fact 2", "fact 3"]
+
+Example:
+Text: "Tesla, led by Elon Musk, makes electric cars in Texas."
+Output: ["Tesla is a company", "Elon Musk leads Tesla", "Tesla makes electric cars", "Tesla is in Texas"]
+
+Text: "{clean_text}"
+Output:"""
     
     payload = {
         "model": model,
         "prompt": prompt,
-        "stream": False,
-        "format": "json"
+        "stream": False
     }
     
     try:
-        response = requests.post(f"{base_url}/api/generate", json=payload, timeout=30)
+        response = requests.post(f"{base_url}/api/generate", json=payload, timeout=timeout)
         response.raise_for_status()
         result = response.json()
         
+        raw_response = result.get("response", "")
+        
+        # Debug: Show raw response
+        with st.expander("🔍 Debug: Ollama Raw Response", expanded=False):
+            st.code(raw_response, language="json")
+        
         # Parse JSON from response
         try:
-            acus = json.loads(result.get("response", "[]"))
-            if isinstance(acus, list):
-                return [str(a) for a in acus]
-            elif isinstance(acus, dict) and "acus" in acus:
-                return [str(a) for a in acus["acus"]]
-            else:
-                return clean_and_split_sentences(text)
-        except json.JSONDecodeError:
+            parsed = json.loads(raw_response)
+            
+            acus = None
+            
+            if isinstance(parsed, list):
+                acus = parsed
+            elif isinstance(parsed, dict):
+                # Check for error response
+                if 'error' in parsed:
+                    st.warning(f"⚠️ Ollama returned error: {parsed['error']}")
+                    return clean_and_split_sentences(text)
+                
+                # Try common keys that might contain ACU list
+                for key in ['acus', 'ACUs', 'result', 'results', 'units', 'content', 'data', 'list', 'items', 'atomic_content_units', 'output']:
+                    if key in parsed:
+                        val = parsed[key]
+                        if isinstance(val, list):
+                            acus = val
+                            break
+                
+                # Try first list value in dict
+                if acus is None:
+                    for val in parsed.values():
+                        if isinstance(val, list):
+                            acus = val
+                            break
+                
+                # NEW: If dict has sentences as keys with empty values, extract the keys
+                if acus is None and len(parsed) > 0:
+                    # Check if values are all empty strings or empty - keys are likely the ACUs
+                    values = list(parsed.values())
+                    if all(v == "" or v is None or v == [] for v in values):
+                        acus = list(parsed.keys())
+                        st.info(f"📋 Extracted {len(acus)} items from dictionary keys")
+            
+            if acus and len(acus) > 0:
+                acus = [str(a).strip() for a in acus if a and str(a).strip()]
+                if len(acus) > 0:
+                    st.success(f"✅ Ollama extracted {len(acus)} ACUs")
+                    return acus
+            
+            st.warning(f"⚠️ Unexpected format from Ollama. Falling back to sentence splitting.")
+            st.code(f"Type: {type(parsed)}, Content: {str(parsed)[:300]}")
+            return clean_and_split_sentences(text)
+            
+        except json.JSONDecodeError as e:
+            st.warning(f"⚠️ JSON parse error: {e}")
+            st.code(f"Raw response: {raw_response[:500]}")
             return clean_and_split_sentences(text)
             
     except Exception as e:
@@ -309,7 +313,6 @@ def decompose_with_ollama(text, model="qwen:8b", base_url="http://localhost:1143
         return clean_and_split_sentences(text)
 
 # --- UI Layout ---
-
 st.title("🧬 Diversity & Novelty Explorer")
 st.markdown("""
 Evaluate text using three mathematical frameworks:
@@ -329,7 +332,8 @@ with st.sidebar:
     st.header("Ollama Settings")
     use_ollama = st.checkbox("Enable Ollama (Local LLM)", value=False, help="Requires Ollama running locally")
     ollama_url = st.text_input("Base URL", "http://localhost:11434")
-    ollama_model = st.text_input("Model Name", "qwen:8b")
+    ollama_model = st.text_input("Model Name", "qwen3:8b")
+    ollama_timeout = st.slider("Timeout (seconds)", min_value=30, max_value=500, value=120, step=10, help="Increase if you get timeout errors")
 
 # --- Shared Input Configuration ---
 st.header("📝 Input Configuration")
@@ -377,7 +381,7 @@ with settings_col1:
 with settings_col2:
     novelty_threshold = st.slider(
         "NovAScore: Novelty Threshold", 
-        min_value=0.0, max_value=1.0, value=0.15, step=0.01,
+        min_value=0.0, max_value=1.0, value=0.85, step=0.01,
         help="Controls how distinct text must be to count as Novel. Lower = More Forgiving. Higher = Stricter."
     )
 
@@ -401,18 +405,15 @@ with tab_main:
             kernel = build_kernel_matrix(embeddings)
             selected = dpp_greedy_selection(kernel, min(num_sentences, len(sentences)))
             
-            # Compression
             full_cr, full_sz, comp_sz = calculate_compression_ratio(sentences)
             subset = [sentences[i] for i in selected]
             sub_cr, sub_sz, sub_comp_sz = calculate_compression_ratio(subset)
             
-            # Display Results
             c1, c2 = st.columns(2)
             with c1:
                 st.success("DPP Selection")
                 for s in subset: st.write(f"- {s}")
                 
-                # Show score
                 subset_matrix = kernel[np.ix_(selected, selected)]
                 det_score = np.linalg.det(subset_matrix) if len(selected) > 0 else 0
                 st.metric("Subset Volume (Determinant)", f"{det_score:.4f}")
@@ -426,7 +427,6 @@ with tab_main:
                     improvement = ((full_cr - sub_cr)/full_cr)*100
                     st.caption(f"Redundancy reduced by {improvement:.1f}% in subset")
 
-            # --- Visualizations (Restored) ---
             st.divider()
             st.subheader("The Mathematics Under the Hood")
             
@@ -436,7 +436,6 @@ with tab_main:
                 st.write("This is the Kernel Matrix $L$. Darker red = More Similar (Redundant).")
                 st.write("The DPP algorithm tries to pick rows/cols that are **not** highly correlated with each other.")
                 
-                # Highlight selected indices in the heatmap labels
                 labels = [f"S{i}: {s[:20]}..." for i, s in enumerate(sentences)]
                 
                 fig = px.imshow(
@@ -455,12 +454,9 @@ with tab_main:
                 st.write("### Why Determinants?")
                 st.write("If we selected highly similar sentences, the matrix would look like this (Rank Deficient):")
                 
-                # Demo of a bad selection
                 if len(sentences) >= 2:
-                    # Find most similar pair
-                    # Use copy to avoid modifying original kernel for other tabs
                     temp_kernel = kernel.copy()
-                    np.fill_diagonal(temp_kernel, -1) # Ignore self
+                    np.fill_diagonal(temp_kernel, -1)
                     i, j = np.unravel_index(np.argmax(temp_kernel), temp_kernel.shape)
                     
                     bad_subset = [i, j]
@@ -498,24 +494,20 @@ with tab_novascore:
         t_text = target_text
         r_text = ref_text
         with st.spinner("Analyzing Novelty..."):
-            # 1. Decomposition
             if use_ollama:
-                st.info(f"Connecting to Ollama ({ollama_model}) for Atomic Extraction...")
-                t_units = decompose_with_ollama(t_text, ollama_model, ollama_url)
-                r_units = decompose_with_ollama(r_text, ollama_model, ollama_url)
+                st.info(f"Connecting to Ollama ({ollama_model}) for Atomic Extraction... (timeout: {ollama_timeout}s)")
+                t_units = decompose_with_ollama(t_text, ollama_model, ollama_url, ollama_timeout)
+                r_units = decompose_with_ollama(r_text, ollama_model, ollama_url, ollama_timeout)
             else:
                 t_units = clean_and_split_sentences(t_text)
                 r_units = clean_and_split_sentences(r_text)
             
-            # 2. Embeddings
             t_embs = get_embeddings(t_units, model)
             r_embs = get_embeddings(r_units, model)
             
-            # 3. Novelty Calculation
             weights = np.ones(len(t_units)) 
             novelty_scores, final_score, match_data = novascore_calculation(t_embs, r_embs, weights, threshold=novelty_threshold)
             
-            # Prepare Match Visualization Data
             matched_content = []
             match_locations = []
 
@@ -537,7 +529,6 @@ with tab_novascore:
                             matched_content.append("Self Error")
                         match_locations.append(f"Self (Unit {m_idx + 1})")
 
-            # Store results in session state
             st.session_state['nova_results'] = {
                 't_units': t_units,
                 'r_units': r_units,
@@ -546,10 +537,11 @@ with tab_novascore:
                 'novelty_scores': novelty_scores,
                 'final_score': final_score,
                 'match_locations': match_locations,
-                'matched_content': matched_content
+                'matched_content': matched_content,
+                'used_ollama': use_ollama,
+                'ollama_model': ollama_model if use_ollama else None
             }
     
-    # Display results from session state
     if 'nova_results' in st.session_state:
         results = st.session_state['nova_results']
         t_units = results['t_units']
@@ -560,14 +552,18 @@ with tab_novascore:
         final_score = results['final_score']
         match_locations = results['match_locations']
         matched_content = results['matched_content']
+        used_ollama = results.get('used_ollama', False)
+        ollama_model_used = results.get('ollama_model', None)
         
-        st.caption("Using Fast Mode (Sentence Splitting). Enable Ollama in sidebar for smarter decomposition.")
+        if used_ollama:
+            st.success(f"✅ Using Ollama ({ollama_model_used}) for Atomic Content Unit extraction.")
+        else:
+            st.caption("Using Fast Mode (Sentence Splitting). Enable Ollama in sidebar for smarter decomposition.")
         
         col_u1, col_u2 = st.columns(2)
         with col_u1: st.write(f"**Target Units:** {len(t_units)}")
         with col_u2: st.write(f"**Reference Units:** {len(r_units)}")
 
-        # 4. Display Results
         st.divider()
         m1, m2 = st.columns([1,3])
         
@@ -612,7 +608,6 @@ with tab_novascore:
             
             st.caption("Novelty Score: 0.0 = Information exists in Reference or appeared earlier in document. 1.0 = Completely new information.")
 
-        # --- Embedding Visualizations ---
         st.divider()
         st.subheader("🔍 Embedding Visualizations")
         
@@ -627,7 +622,6 @@ with tab_novascore:
             st.caption("Shows how similar each Target unit is to each Reference unit. Darker = More Similar.")
             
             if len(t_embs) > 0 and len(r_embs) > 0:
-                # Target vs Reference similarity
                 cross_sim = np.dot(t_embs, r_embs.T)
                 
                 t_labels = [f"T{i+1}: {u[:25]}..." for i, u in enumerate(t_units)]
@@ -645,7 +639,6 @@ with tab_novascore:
                 fig_cross.update_layout(height=400)
                 st.plotly_chart(fig_cross, use_container_width=True)
                 
-                # Self-similarity within target
                 st.markdown("**Target Self-Similarity Matrix**")
                 st.caption("Shows internal redundancy within the Target document.")
                 
@@ -671,16 +664,13 @@ with tab_novascore:
             dim_method = st.radio("Reduction Method", ["PCA", "t-SNE"], horizontal=True, key="dim_method")
             
             if len(t_embs) > 0:
-                # Combine all embeddings
                 all_embs = np.vstack([t_embs, r_embs]) if len(r_embs) > 0 else t_embs
                 all_labels = t_units + r_units if len(r_embs) > 0 else t_units
                 all_types = ['Target'] * len(t_units) + ['Reference'] * len(r_units)
                 all_ids = [f"T{i+1}" for i in range(len(t_units))] + [f"R{i+1}" for i in range(len(r_units))]
                 
-                # Add novelty scores for coloring
                 all_novelty = list(novelty_scores) + [None] * len(r_units)
                 
-                # Reduce dimensions
                 reduced = reduce_dimensions(all_embs, method=dim_method.lower())
                 
                 if reduced.shape[1] >= 2:
@@ -719,7 +709,6 @@ with tab_novascore:
             if model is None:
                 st.warning("Word-level analysis requires the Sentence Transformer model.")
             else:
-                # Let user pick two sentences to compare
                 all_sentences = t_units + r_units
                 all_sentence_labels = [f"T{i+1}: {s[:40]}..." for i, s in enumerate(t_units)] + \
                                       [f"R{i+1}: {s[:40]}..." for i, s in enumerate(r_units)]
@@ -737,12 +726,10 @@ with tab_novascore:
                     sent1 = all_sentences[sent1_idx]
                     sent2 = all_sentences[sent2_idx]
                     
-                    # Get word embeddings
                     words1, embs1, contrib1 = get_word_embeddings(sent1, model)
                     words2, embs2, contrib2 = get_word_embeddings(sent2, model)
                     
                     if words1 is not None and words2 is not None and len(words1) > 0 and len(words2) > 0:
-                        # Calculate word-word similarity
                         word_sim = calculate_word_similarity_matrix(words1, embs1, words2, embs2)
                         
                         st.markdown("**Word-to-Word Similarity Matrix**")
@@ -760,7 +747,6 @@ with tab_novascore:
                         fig_word.update_layout(height=400)
                         st.plotly_chart(fig_word, use_container_width=True)
                         
-                        # Show word contributions
                         st.markdown("**Word Importance (Contribution to Sentence Meaning)**")
                         
                         word_col1, word_col2 = st.columns(2)
@@ -788,7 +774,6 @@ with tab_novascore:
                             fig_contrib2.update_layout(height=250, showlegend=False)
                             st.plotly_chart(fig_contrib2, use_container_width=True)
                         
-                        # Highlight strongest connections
                         st.markdown("**Strongest Word Connections**")
                         top_k = min(5, word_sim.size)
                         flat_indices = np.argsort(word_sim.flatten())[-top_k:][::-1]
