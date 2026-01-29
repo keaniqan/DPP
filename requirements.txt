@@ -9,3 +9,4 @@ nltk
 rouge-score
 evaluate
 diversity
+spacy
