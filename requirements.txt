@@ -5,3 +5,7 @@ plotly
 requests
 sentence-transformers
 scikit-learn
+nltk
+rouge-score
+evaluate
+diversity

@@ -1,4 +1,5 @@
 import streamlit as st
+import diversity as div
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -33,6 +34,65 @@ def get_word_frequency(text):
 def get_high_frequency_words(word_counts, max_occurrences):
     """Get words that exceed the max occurrence threshold."""
     return {word for word, count in word_counts.items() if count > max_occurrences}
+
+# --- Diversity Library Metrics ---
+def calculate_diversity_compression_ratio(sentences, algorithm='gzip'):
+    """Calculate compression ratio using diversity library."""
+    try:
+        return div.compression_ratio(sentences, algorithm=algorithm)
+    except Exception as e:
+        return None
+
+def calculate_ngram_diversity(sentences, num_n=4):
+    """Calculate n-gram diversity score using diversity library."""
+    try:
+        return div.ngram_diversity_score(sentences, num_n=num_n)
+    except Exception as e:
+        return None
+
+def calculate_token_patterns(sentences, n=2, top_n=10):
+    """Find most common n-gram patterns using diversity library."""
+    try:
+        return div.token_patterns(sentences, n=n, top_n=top_n)
+    except Exception as e:
+        return []
+
+def calculate_pos_patterns(sentences, pattern):
+    """Find text matching part-of-speech patterns using diversity library."""
+    try:
+        pos_tags, pos_tuples = div.get_pos(sentences)
+        matches = div.pos_patterns(pos_tuples, pattern)
+        return matches, pos_tags, pos_tuples
+    except Exception as e:
+        return set(), [], []
+
+def get_part_of_speech_analysis(sentences):
+    """Get part-of-speech tagging for sentences using diversity library."""
+    try:
+        pos_tags, pos_tuples = div.get_pos(sentences)
+        return pos_tags, pos_tuples
+    except Exception as e:
+        return [], []
+
+def calculate_homogenization_score(sentences, measure='rougel', use_stemmer=False):
+    """
+    Calculate homogenization score using diversity library.
+    Note: This is computationally expensive for large datasets (O(n²) comparisons).
+    """
+    try:
+        return div.homogenization_score(sentences, measure=measure, use_stemmer=use_stemmer)
+    except Exception as e:
+        return None
+
+def get_top_n_frequent_words(word_counts, n):
+    """Get the top N most frequent words."""
+    if n <= 0 or not word_counts:
+        return set()
+    
+    # Sort words by frequency and get top N
+    sorted_words = sorted(word_counts.items(), key=lambda x: x[1], reverse=True)
+    top_n = sorted_words[:min(n, len(sorted_words))]
+    return {word for word, count in top_n}
 
 def filter_sentences_by_word_frequency(sentences, words_to_remove):
     """
@@ -105,6 +165,40 @@ def get_embeddings(sentences, model):
         return embeddings
 
 # --- Core Math: Determinantal Point Process ---
+def calculate_theoretical_max_log_det(n_sentences):
+    """
+    Calculate the theoretical maximum log-determinant assuming perfect orthogonality.
+    
+    If every sentence were completely semantically unique (orthogonal), 
+    the similarity matrix L would be an identity matrix I.
+    Then L + I = 2I, and det(2I) = 2^n for n sentences.
+    Therefore, max log-det = log(2^n) = n * log(2)
+    
+    Args:
+        n_sentences: Number of sentences
+    
+    Returns:
+        theoretical_max: The theoretical maximum log-determinant
+    """
+    import math
+    return n_sentences * math.log(2)
+
+def calculate_diversity_percentage(actual_log_det, n_sentences):
+    """
+    Calculate what percentage of theoretical maximum diversity is achieved.
+    
+    Args:
+        actual_log_det: The actual log-determinant score
+        n_sentences: Number of sentences
+    
+    Returns:
+        percentage: Percentage of maximum theoretical diversity (0-100%)
+    """
+    theoretical_max = calculate_theoretical_max_log_det(n_sentences)
+    if theoretical_max <= 0:
+        return 0.0
+    return min(100.0, (actual_log_det / theoretical_max) * 100)
+
 def build_kernel_matrix(embeddings, alpha=1.0):
     """Constructs the DPP Kernel Matrix (L) = V · V^T.
     
@@ -444,6 +538,99 @@ def calculate_compression_ratio(sentences):
     cr = uncompressed_size / compressed_size
     return cr, uncompressed_size, compressed_size
 
+def calculate_semantic_compression(sentences, embeddings, model, n_clusters=None):
+    """
+    Calculates true Semantic Compression Ratio using the methodology from 
+    "Compression-Based Metrics: The Homogenization Score".
+    
+    Process:
+    1. Cluster: Map semantically similar words to cluster IDs
+    2. Encode: Convert text to sequence of cluster IDs  
+    3. Compress: Apply compression to ID sequence
+    
+    Args:
+        sentences: List of sentences
+        embeddings: Sentence embeddings 
+        model: Embedding model for word-level analysis
+        n_clusters: Number of semantic clusters (auto-determined if None)
+    
+    Returns:
+        tuple: (semantic_cr, homogenization_score, cluster_sequence, word_clusters)
+    """
+    if not sentences or model is None:
+        # Fallback to standard compression
+        return calculate_compression_ratio(sentences) + ([], {})
+    
+    try:
+        # Step 1: Extract and embed all unique words
+        all_words = []
+        for sentence in sentences:
+            words = re.findall(r'\b[a-zA-Z]+\b', sentence.lower())
+            all_words.extend(words)
+        
+        unique_words = list(set(all_words))
+        if len(unique_words) < 2:
+            return calculate_compression_ratio(sentences) + ([], {})
+        
+        # Get word embeddings
+        word_embeddings = model.encode(unique_words)
+        
+        # Step 2: Cluster words semantically
+        if n_clusters is None:
+            # Auto-determine clusters (approximately sqrt of unique words, min 2, max 50)
+            n_clusters = min(max(2, int(len(unique_words) ** 0.5)), 50)
+        
+        from sklearn.cluster import KMeans
+        kmeans = KMeans(n_clusters=min(n_clusters, len(unique_words)), random_state=42, n_init=10)
+        word_cluster_labels = kmeans.fit_predict(word_embeddings)
+        
+        # Create word-to-cluster mapping
+        word_to_cluster = {word: f"C_{label}" for word, label in zip(unique_words, word_cluster_labels)}
+        
+        # Step 3: Convert sentences to cluster ID sequences
+        cluster_sequences = []
+        for sentence in sentences:
+            words = re.findall(r'\b[a-zA-Z]+\b', sentence.lower())
+            cluster_seq = [word_to_cluster.get(word, f"C_{n_clusters}") for word in words]  # Unknown words get separate cluster
+            cluster_sequences.extend(cluster_seq)
+        
+        # Step 4: Compress the cluster sequence
+        cluster_text = " ".join(cluster_sequences)
+        encoded_clusters = cluster_text.encode('utf-8')
+        compressed_clusters = gzip.compress(encoded_clusters)
+        
+        uncompressed_size = len(encoded_clusters)
+        compressed_size = len(compressed_clusters)
+        
+        if compressed_size == 0:
+            return 0.0, 0.0, cluster_sequences, word_to_cluster
+        
+        semantic_cr = uncompressed_size / compressed_size
+        
+        # Step 5: Calculate Homogenization Score
+        # Compare against random baseline compression
+        import random
+        random.seed(42)  # Reproducible
+        random_sequences = cluster_sequences.copy()
+        random.shuffle(random_sequences)
+        random_text = " ".join(random_sequences)
+        random_encoded = random_text.encode('utf-8')
+        random_compressed = gzip.compress(random_encoded)
+        
+        if len(random_compressed) == 0:
+            homogenization_score = 0.0
+        else:
+            random_cr = len(random_encoded) / len(random_compressed)
+            # Homogenization Score: how much easier is it to compress than random
+            homogenization_score = semantic_cr / random_cr if random_cr > 0 else 0.0
+        
+        return semantic_cr, homogenization_score, cluster_sequences, word_to_cluster
+        
+    except Exception as e:
+        # Fallback to standard compression if semantic compression fails
+        standard_result = calculate_compression_ratio(sentences)
+        return standard_result + ([], {})
+
 def novascore_calculation(target_embeddings, reference_embeddings, weights=None, threshold=0.15):
     """Calculates NovAScore using vector similarity with Iterative Self-Comparison."""
     num_target = len(target_embeddings)
@@ -587,11 +774,31 @@ with st.sidebar:
     
     enable_word_filter = st.checkbox("Enable Word Filtering", value=False)
     
-    word_freq_threshold = st.slider(
-        "Max Word Repetition",
-        min_value=1, max_value=50, value=10, step=1,
-        help="Words appearing more than this many times will be filtered."
-    )
+    if enable_word_filter:
+        filter_method = st.radio(
+            "Filtering Method",
+            ["Frequency Threshold", "Top-N Words"],
+            help="Choose between filtering by frequency threshold or top N most frequent words"
+        )
+        
+        if filter_method == "Frequency Threshold":
+            word_freq_threshold = st.slider(
+                "Max Word Repetition",
+                min_value=1, max_value=50, value=10, step=1,
+                help="Words appearing more than this many times will be filtered."
+            )
+            top_n_words = 0
+        else:
+            top_n_words = st.slider(
+                "Top N Words to Filter",
+                min_value=1, max_value=100, value=20, step=1,
+                help="Filter out the N most frequent words from the document."
+            )
+            word_freq_threshold = 50  # Default value, not used
+    else:
+        filter_method = "Frequency Threshold"
+        word_freq_threshold = 10
+        top_n_words = 0
     
     enable_duplicate_filter = st.checkbox("Remove Duplicate Sentences", value=True)
     
@@ -645,7 +852,7 @@ with run_col1:
     run_all = st.button("🚀 Run All Analyses", type="primary", use_container_width=True)
 
 with run_col2:
-    st.caption("Run DPP Diversity, Semantic Compression, NovAScore, and Word Frequency analysis all at once.")
+    st.caption("Run DPP Diversity, Semantic Compression, NovAScore, Word Frequency, and Diversity Library analysis all at once.")
 
 if run_all:
     with st.spinner("Running all analyses..."):
@@ -668,8 +875,14 @@ if run_all:
             # Word filtering
             if enable_word_filter:
                 word_counts = get_word_frequency(target_text)
-                words_to_remove = get_high_frequency_words(word_counts, word_freq_threshold)
-                filter_stats['words_filtered'] = len(words_to_remove)
+                if filter_method == "Top-N Words":
+                    words_to_remove = get_top_n_frequent_words(word_counts, top_n_words)
+                    filter_stats['words_filtered'] = len(words_to_remove)
+                    filter_stats['filter_method'] = f"Top-{top_n_words} Words"
+                else:
+                    words_to_remove = get_high_frequency_words(word_counts, word_freq_threshold)
+                    filter_stats['words_filtered'] = len(words_to_remove)
+                    filter_stats['filter_method'] = f"Threshold > {word_freq_threshold}"
                 sentences = filter_sentences_by_word_frequency(sentences_dedup, words_to_remove)
             else:
                 sentences = sentences_dedup
@@ -788,16 +1001,47 @@ if run_all:
                     'unique_words': len(word_counts)
                 }
                 
+                # 5. Diversity Library Analysis
+                cr_gzip = calculate_diversity_compression_ratio(sentences, algorithm='gzip')
+                cr_xz = calculate_diversity_compression_ratio(sentences, algorithm='xz')
+                
+                ngram_scores = {}
+                for n in range(1, 5):
+                    ngram_scores[n] = calculate_ngram_diversity(sentences, num_n=n)
+                overall_ngram = calculate_ngram_diversity(sentences, num_n=4)
+                
+                bigram_patterns = calculate_token_patterns(sentences, n=2, top_n=15)
+                trigram_patterns = calculate_token_patterns(sentences, n=3, top_n=15)
+                fourgram_patterns = calculate_token_patterns(sentences, n=4, top_n=10)
+                
+                pos_tags, pos_tuples = get_part_of_speech_analysis(sentences)
+                
+                st.session_state['diversity_lib_results'] = {
+                    'sentences': sentences,
+                    'cr_gzip': cr_gzip,
+                    'cr_xz': cr_xz,
+                    'ngram_scores': ngram_scores,
+                    'overall_ngram': overall_ngram,
+                    'bigram_patterns': bigram_patterns,
+                    'trigram_patterns': trigram_patterns,
+                    'fourgram_patterns': fourgram_patterns,
+                    'pos_tags': pos_tags,
+                    'pos_tuples': pos_tuples,
+                    'homog_score': None,
+                    'homog_measure': None
+                }
+                
                 st.success("✅ All analyses complete! Check the tabs below for results.")
 
 st.divider()
 
 # Tabs for results
-tab_main, tab_compression, tab_novascore, tab_word_freq, tab_iterative = st.tabs([
+tab_main, tab_compression, tab_novascore, tab_word_freq, tab_diversity_lib, tab_iterative = st.tabs([
     "📊 Diversity (DPP)", 
     "📦 Compression", 
     "🔬 Novelty (NovAScore)", 
     "📈 Word Frequency",
+    "📚 Diversity Library",
     "📉 Iterative Analysis"
 ])
 
@@ -833,8 +1077,14 @@ with tab_main:
             # Step 0b: Apply word frequency filtering if enabled
             if enable_word_filter:
                 word_counts = get_word_frequency(input_text)
-                words_to_remove = get_high_frequency_words(word_counts, word_freq_threshold)
-                filter_stats['words_filtered'] = len(words_to_remove)
+                if filter_method == "Top-N Words":
+                    words_to_remove = get_top_n_frequent_words(word_counts, top_n_words)
+                    filter_stats['words_filtered'] = len(words_to_remove)
+                    filter_stats['filter_method'] = f"Top-{top_n_words} Words"
+                else:
+                    words_to_remove = get_high_frequency_words(word_counts, word_freq_threshold)
+                    filter_stats['words_filtered'] = len(words_to_remove)
+                    filter_stats['filter_method'] = f"Threshold > {word_freq_threshold}"
                 sentences = filter_sentences_by_word_frequency(sentences_dedup, words_to_remove)
             else:
                 sentences = sentences_dedup
@@ -921,29 +1171,69 @@ with tab_main:
         # Main metrics row
         st.subheader("📊 Diversity Metrics")
         
+        # Calculate theoretical maximum
+        theoretical_max_log_det = calculate_theoretical_max_log_det(len(sentences))
+        diversity_percentage = calculate_diversity_percentage(log_det, len(sentences))
+        
         m1, m2, m3, m4 = st.columns(4)
         
         with m1:
+            st.metric(
+                "Sentences", 
+                f"{len(sentences)}",
+                help="Total number of sentences analyzed"
+            )
+        
+        with m2:
+            st.metric(
+                "Dimensions", 
+                f"{embeddings.shape[1]}",
+                help="Embedding vector dimension (semantic feature space)"
+            )
+        
+        with m3:
             st.metric(
                 "Log-Determinant", 
                 f"{log_det:.4f}",
                 help="log det(L + I) — Higher = More Diverse (grows with noise)"
             )
         
-        with m2:
+        with m4:
+            st.metric(
+                "Max Theoretical", 
+                f"{theoretical_max_log_det:.4f}",
+                help="Maximum possible log-det if all sentences were completely unique (orthogonal)"
+            )
+
+        m5, m6, m7, m8 = st.columns(4)
+        
+        with m5:
+            st.metric(
+                "Diversity %",
+                f"{diversity_percentage:.1f}%",
+                help="Percentage of theoretical maximum diversity achieved"
+            )
+        
+        with m6:
             st.metric(
                 "Vendi Score",
                 f"{vendi_score:.2f}",
                 help="Effective number of unique concepts — Plateaus for redundant content"
             )
         
-        with m3:
+        with m7:
             st.metric(
                 "Normalized Score",
                 f"{normalized_score:.4f}",
                 help="Log-det divided by number of sentences (per-sentence diversity)"
             )
         
+        with m8:
+            st.metric(
+                "Avg Similarity",
+                f"{avg_similarity:.4f}",
+                help="Average pairwise similarity between sentences"
+            )
 
         
         # Interpretation
@@ -976,10 +1266,6 @@ with tab_main:
             st.caption(f"Sentence {j+1}: {sentences[j][:80]}...")
         
         st.divider()
-        st.markdown(f"**Average Pairwise Similarity:** {avg_similarity:.4f}")
-        st.caption("Lower average similarity = more diverse document")
-        
-        st.divider()
         st.subheader("🔬 The Mathematics")
         
         vis_tab1, vis_tab2, vis_tab3 = st.tabs(["Similarity Matrix (Kernel L)", "Diversity Visualization", "🎯 Concept Clustering"])
@@ -1003,15 +1289,21 @@ with tab_main:
             st.caption("Diagonal = 1.0 (sentence vs itself). Off-diagonal shows pairwise similarity.")
             
             # Show the formula
-            st.markdown("""
+            st.markdown(f"""
             **The DPP Diversity Formula:**
             
-            $$\\text{Diversity Score} = \\log\\det(L + I)$$
+            $$\\text{{Diversity Score}} = \\log\\det(L + I)$$
             
             Where:
             - $L$ = Similarity kernel matrix (shown above)
             - $I$ = Identity matrix (for numerical stability)
             - Higher log-det = vectors span more volume = **more diverse**
+            
+            **Theoretical Maximum:**
+            If all sentences were completely unique (orthogonal), $L = I$ and:
+            $$\\text{{Max Log-Det}} = \\log\\det(2I) = \\log(2^n) = n \\times \\log(2) \\approx {theoretical_max_log_det:.4f}$$
+            
+            Your document achieves **{diversity_percentage:.1f}%** of this theoretical maximum.
             """)
 
         with vis_tab2:
@@ -1246,7 +1538,15 @@ with tab_compression:
         if len(sentences) < 2:
             st.error("Need at least 2 sentences.")
         else:
-            full_cr, full_sz, comp_sz = calculate_compression_ratio(sentences)
+            with st.spinner("Calculating compression metrics..."):
+                # Standard text compression
+                full_cr, full_sz, comp_sz = calculate_compression_ratio(sentences)
+                
+                # Semantic compression
+                embeddings = get_embeddings(sentences, model)
+                semantic_cr, homogenization_score, cluster_sequences, word_clusters = calculate_semantic_compression(
+                    sentences, embeddings, model
+                )
             
             # Iterative analysis
             iterative_compression_df = None
@@ -1259,6 +1559,10 @@ with tab_compression:
                 'full_cr': full_cr,
                 'full_sz': full_sz,
                 'comp_sz': comp_sz,
+                'semantic_cr': semantic_cr,
+                'homogenization_score': homogenization_score,
+                'cluster_sequences': cluster_sequences,
+                'word_clusters': word_clusters,
                 'iterative_df': iterative_compression_df
             }
     
@@ -1268,14 +1572,22 @@ with tab_compression:
         full_cr = results['full_cr']
         full_sz = results['full_sz']
         comp_sz = results['comp_sz']
+        semantic_cr = results.get('semantic_cr', 0.0)
+        homogenization_score = results.get('homogenization_score', 0.0)
+        cluster_sequences = results.get('cluster_sequences', [])
+        word_clusters = results.get('word_clusters', {})
         
         st.divider()
         
-        # Metrics display
+        # Metrics display - Split into two sections
+        st.subheader("📊 Compression Analysis")
+        
+        # Standard compression metrics
+        st.markdown("**Standard Text Compression (gzip)**")
         m1, m2, m3 = st.columns(3)
         
         with m1:
-            st.metric("Compression Ratio", f"{full_cr:.2f}", help="Compression Ratio = Uncompressed / Compressed")
+            st.metric("Text Compression Ratio", f"{full_cr:.2f}", help="Standard gzip compression of raw text")
         
         with m2:
             st.metric("Original Size", f"{full_sz:,} bytes")
@@ -1283,26 +1595,119 @@ with tab_compression:
         with m3:
             st.metric("Compressed Size", f"{comp_sz:,} bytes")
         
+        st.divider()
+        
+        # Semantic compression metrics
+        st.markdown("**Semantic Compression (Cluster-based)**")
+        m4, m5, m6 = st.columns(3)
+        
+        with m4:
+            st.metric(
+                "Semantic Compression Ratio", 
+                f"{semantic_cr:.2f}", 
+                help="Compression ratio after clustering semantically similar words"
+            )
+        
+        with m5:
+            st.metric(
+                "Homogenization Score", 
+                f"{homogenization_score:.2f}", 
+                help="How much easier to compress than random baseline (higher = more redundant)"
+            )
+        
+        with m6:
+            if word_clusters:
+                unique_clusters = len(set(word_clusters.values()))
+                st.metric(
+                    "Semantic Clusters", 
+                    f"{unique_clusters}", 
+                    help="Number of semantic word clusters identified"
+                )
+            else:
+                st.metric("Semantic Clusters", "N/A")
+        
         # Interpretation
-        if full_cr > 3.0:
-            st.error("**High Redundancy**: Document compresses very well, indicating repetitive content.")
-        elif full_cr > 2.0:
-            st.warning("**Moderate Redundancy**: Document has some repetitive patterns.")
-        else:
-            st.success("**Low Redundancy**: Document has relatively unique content.")
+        st.divider()
+        st.markdown("**📈 Interpretation**")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("**Standard Compression**")
+            if full_cr > 3.0:
+                st.error("**High Redundancy**: Text compresses very well, indicating repetitive patterns.")
+            elif full_cr > 2.0:
+                st.warning("**Moderate Redundancy**: Some repetitive patterns detected.")
+            else:
+                st.success("**Low Redundancy**: Relatively unique text content.")
+        
+        with col2:
+            st.markdown("**Semantic Compression**")
+            if semantic_cr > 0:
+                if homogenization_score > 2.0:
+                    st.error(f"**High Semantic Redundancy**: {homogenization_score:.1f}x easier to compress than random.")
+                elif homogenization_score > 1.5:
+                    st.warning(f"**Moderate Semantic Redundancy**: {homogenization_score:.1f}x easier to compress than random.")
+                else:
+                    st.success(f"**Low Semantic Redundancy**: {homogenization_score:.1f}x easier to compress than random.")
+            else:
+                st.info("**Semantic analysis unavailable** (requires embedding model)")
         
         st.divider()
         
-        # Explanation
-        st.markdown("""
-        **How to interpret Compression Ratio:**
-        - **CR > 3.0** = Highly redundant (lots of repeated phrases/ideas)
-        - **CR 2.0-3.0** = Moderately redundant
-        - **CR < 2.0** = Low redundancy (more unique content)
+        # Show methodology
+        st.markdown("**🔬 Methodology**")
         
-        The compression ratio measures how much the text can be compressed using gzip.
-        Repetitive text compresses better, resulting in a higher ratio.
-        """)
+        method_tab1, method_tab2 = st.tabs(["Standard Compression", "Semantic Compression"])
+        
+        with method_tab1:
+            st.markdown("""
+            **Standard Text Compression (gzip):**
+            1. Take raw text as-is
+            2. Apply gzip compression algorithm
+            3. Calculate ratio: original_size / compressed_size
+            
+            **Limitations:**
+            - Cannot detect paraphrasing ("dog" vs "canine")
+            - Misses semantic redundancy
+            - Only catches exact repetition
+            """)
+        
+        with method_tab2:
+            if word_clusters:
+                st.markdown("""
+                **Semantic Compression Process:**
+                1. **Cluster**: Group semantically similar words into cluster IDs
+                2. **Encode**: Convert text to sequence of cluster IDs  
+                3. **Compress**: Apply compression to the ID sequence
+                4. **Compare**: Measure against random baseline
+                
+                **Key Insight:**
+                - 100 paraphrases → highly repetitive cluster sequence → high compression
+                - 100 unique facts → random cluster sequence → low compression
+                """)
+                
+                # Show word clustering examples
+                st.markdown("**Word Clustering Examples:**")
+                
+                # Group clusters for display
+                cluster_to_words = {}
+                for word, cluster_id in word_clusters.items():
+                    if cluster_id not in cluster_to_words:
+                        cluster_to_words[cluster_id] = []
+                    cluster_to_words[cluster_id].append(word)
+                
+                # Show first few clusters with multiple words
+                examples_shown = 0
+                for cluster_id, words in cluster_to_words.items():
+                    if len(words) > 1 and examples_shown < 5:
+                        st.markdown(f"- **{cluster_id}**: {', '.join(words[:10])}{'...' if len(words) > 10 else ''}")
+                        examples_shown += 1
+                
+                if examples_shown == 0:
+                    st.info("No significant word clusters found (most words are unique).")
+            else:
+                st.info("Semantic compression requires an embedding model. Currently using TF-IDF fallback.")
 
 # --- TAB 3: NovAScore ---
 with tab_novascore:
@@ -1338,15 +1743,23 @@ with tab_novascore:
             
             # Apply word frequency filtering if enabled
             if enable_word_filter:
-                # Get word frequency from target text
-                word_counts = get_word_frequency(t_text)
-                words_to_remove = get_high_frequency_words(word_counts, word_freq_threshold)
+                word_counts_target = get_word_frequency(t_text)
+                word_counts_ref = get_word_frequency(r_text)
                 
-                if words_to_remove:
-                    st.info(f"🔄 Filtering {len(words_to_remove)} high-frequency words: {', '.join(sorted(words_to_remove)[:10])}{'...' if len(words_to_remove) > 10 else ''}")
+                if filter_method == "Top-N Words":
+                    words_to_remove_t = get_top_n_frequent_words(word_counts_target, top_n_words)
+                    words_to_remove_r = get_top_n_frequent_words(word_counts_ref, top_n_words)
+                    filter_description = f"top {top_n_words} most frequent words"
+                else:
+                    words_to_remove_t = get_high_frequency_words(word_counts_target, word_freq_threshold)
+                    words_to_remove_r = get_high_frequency_words(word_counts_ref, word_freq_threshold)
+                    filter_description = f"words appearing > {word_freq_threshold} times"
                 
-                t_units = filter_sentences_by_word_frequency(t_units_dedup, words_to_remove)
-                r_units = filter_sentences_by_word_frequency(r_units_dedup, words_to_remove)
+                if words_to_remove_t or words_to_remove_r:
+                    st.info(f"🔄 Filtering {filter_description}. Target: {len(words_to_remove_t)}, Reference: {len(words_to_remove_r)} words")
+                
+                t_units = filter_sentences_by_word_frequency(t_units_dedup, words_to_remove_t)
+                r_units = filter_sentences_by_word_frequency(r_units_dedup, words_to_remove_r)
             else:
                 t_units = t_units_dedup
                 r_units = r_units_dedup
@@ -1693,8 +2106,11 @@ with tab_word_freq:
             vocab_richness = unique_words / total_words if total_words > 0 else 0
             st.metric("Vocabulary Richness", f"{vocab_richness:.2%}")
         with metric_col4:
-            words_above_threshold = len([w for w, c in word_counts.items() if c > word_freq_threshold])
-            st.metric(f"Words > {word_freq_threshold} occurrences", words_above_threshold)
+            if enable_word_filter and filter_method == "Top-N Words":
+                st.metric(f"Top {top_n_words} most frequent", min(top_n_words, len(word_counts)))
+            else:
+                words_above_threshold = len([w for w, c in word_counts.items() if c > word_freq_threshold])
+                st.metric(f"Words > {word_freq_threshold} occurrences", words_above_threshold)
         
         st.divider()
         
@@ -1707,15 +2123,20 @@ with tab_word_freq:
         # Add rank column
         df_words.insert(0, 'Rank', range(1, len(df_words) + 1))
         
-        # Mark words that would be filtered
-        df_words['Would Be Filtered'] = df_words['Count'] > word_freq_threshold
+        # Mark words that would be filtered based on current settings
+        if enable_word_filter and filter_method == "Top-N Words":
+            df_words['Would Be Filtered'] = df_words['Rank'] <= top_n_words
+            filter_description = f"Top {top_n_words} most frequent words"
+        else:
+            df_words['Would Be Filtered'] = df_words['Count'] > word_freq_threshold
+            filter_description = f"Words appearing > {word_freq_threshold} times"
         
         # Display options
         view_col1, view_col2 = st.columns([2, 1])
         with view_col1:
             show_top_n = st.slider("Show top N words", 10, min(200, len(df_words)), 50, key="show_top_n")
         with view_col2:
-            show_filtered_only = st.checkbox("Show only filterable words", value=False)
+            show_filtered_only = st.checkbox("Show only words to be filtered", value=False)
         
         # Filter display
         display_df = df_words.copy()
@@ -1743,12 +2164,39 @@ with tab_word_freq:
                 height=400,
                 showlegend=True
             )
-            fig.add_hline(
-                y=word_freq_threshold, 
-                line_dash="dash", 
-                line_color="red",
-                annotation_text=f"Threshold: {word_freq_threshold}"
-            )
+            if enable_word_filter and filter_method == "Top-N Words":
+                # For top-N filtering, highlight the cutoff position with a vertical line
+                if top_n_words <= len(display_df):
+                    # Add background color for top-N words
+                    fig.update_layout(
+                        shapes=[
+                            dict(
+                                type="rect",
+                                x0=-0.5,
+                                y0=0,
+                                x1=top_n_words - 0.5,
+                                y1=max(display_df['Count']) * 1.1,
+                                fillcolor="rgba(255, 0, 0, 0.1)",
+                                line=dict(width=0)
+                            )
+                        ],
+                        annotations=[
+                            dict(
+                                x=top_n_words / 2,
+                                y=max(display_df['Count']) * 1.05,
+                                text=f"Top {top_n_words} Words",
+                                showarrow=False,
+                                font=dict(color="red")
+                            )
+                        ]
+                    )
+            else:
+                fig.add_hline(
+                    y=word_freq_threshold, 
+                    line_dash="dash", 
+                    line_color="red",
+                    annotation_text=f"Threshold: {word_freq_threshold}"
+                )
             st.plotly_chart(fig, use_container_width=True)
         
         with table_col:
@@ -1776,7 +2224,7 @@ with tab_word_freq:
         # Show words that would be filtered
         filtered_words = df_words[df_words['Would Be Filtered']]['Word'].tolist()
         if filtered_words:
-            st.warning(f"⚠️ **{len(filtered_words)} words** exceed the threshold of {word_freq_threshold} and would be filtered:")
+            st.warning(f"⚠️ **{len(filtered_words)} words** would be filtered using {filter_description}:")
             
             # Display in columns
             n_cols = 5
@@ -1789,7 +2237,10 @@ with tab_word_freq:
             if len(filtered_words) > 50:
                 st.caption(f"... and {len(filtered_words) - 50} more words")
         else:
-            st.success(f"✅ No words exceed the threshold of {word_freq_threshold}. No filtering will be applied.")
+            if enable_word_filter and filter_method == "Top-N Words":
+                st.success(f"✅ Top {top_n_words} words would be filtered, but none found in current view.")
+            else:
+                st.success(f"✅ No words exceed the threshold of {word_freq_threshold}. No filtering will be applied.")
         
         # Common stopwords suggestion
         st.divider()
@@ -1811,7 +2262,533 @@ with tab_word_freq:
             ])
             st.dataframe(stopwords_df, use_container_width=True, height=200)
 
-# --- TAB 5: Iterative Analysis ---
+# --- TAB 5: Diversity Library Metrics ---
+with tab_diversity_lib:
+    st.subheader("📚 Diversity Library Metrics")
+    st.markdown("""
+    Comprehensive text diversity evaluation using the **diversity** library.
+    
+    **Available Metrics:**
+    - **Compression Ratio**: Information-theoretic redundancy (gzip/xz)
+    - **N-gram Diversity**: Unique n-gram patterns in text
+    - **Token Patterns**: Most frequent n-gram phrases
+    - **Part-of-Speech Patterns**: Find text matching grammatical patterns
+    - **Homogenization Score**: Corpus-level similarity measurement (ROUGE-L based)
+    """)
+    
+    # Homogenization settings - defaults
+    run_homogenization = False
+    homog_measure = 'rougel'
+    use_stemmer = False
+    
+    with st.expander("⚙️ Advanced Settings"):
+        run_homogenization = st.checkbox(
+            "Calculate Homogenization Score",
+            value=False,
+            help="⚠️ Computationally expensive - O(n²) pairwise comparisons. Best for < 50 sentences."
+        )
+        if run_homogenization:
+            homog_measure = st.selectbox(
+                "Similarity Measure",
+                options=['rougel', 'bleu'],
+                index=0,
+                help="ROUGE-L is recommended for most use cases"
+            )
+            use_stemmer = st.checkbox("Use Stemmer (ROUGE-L only)", value=False)
+    
+    if st.button("🔍 Run Diversity Library Analysis", key="btn_diversity_lib"):
+        input_text = target_text
+        sentences = clean_and_split_sentences(input_text)
+        
+        if len(sentences) < 2:
+            st.error("Need at least 2 sentences.")
+        else:
+            with st.spinner("Running diversity library analysis..."):
+                # 1. Compression Ratio
+                cr_gzip = calculate_diversity_compression_ratio(sentences, algorithm='gzip')
+                cr_xz = calculate_diversity_compression_ratio(sentences, algorithm='xz')
+                
+                # 2. N-gram Diversity
+                ngram_scores = {}
+                for n in range(1, 5):
+                    ngram_scores[n] = calculate_ngram_diversity(sentences, num_n=n)
+                overall_ngram = calculate_ngram_diversity(sentences, num_n=4)
+                
+                # 3. Token Patterns (bigrams, trigrams, 4-grams)
+                bigram_patterns = calculate_token_patterns(sentences, n=2, top_n=15)
+                trigram_patterns = calculate_token_patterns(sentences, n=3, top_n=15)
+                fourgram_patterns = calculate_token_patterns(sentences, n=4, top_n=10)
+                
+                # 4. Part-of-Speech Analysis
+                pos_tags, pos_tuples = get_part_of_speech_analysis(sentences)
+                
+                # 5. Homogenization Score (optional, computationally expensive)
+                homog_score = None
+                if run_homogenization:
+                    if len(sentences) > 50:
+                        st.warning(f"⚠️ Homogenization score with {len(sentences)} sentences may take a while...")
+                    with st.spinner("Calculating homogenization score (this may take a while)..."):
+                        homog_score = calculate_homogenization_score(
+                            sentences, 
+                            measure=homog_measure, 
+                            use_stemmer=use_stemmer
+                        )
+                
+                # Store results
+                st.session_state['diversity_lib_results'] = {
+                    'sentences': sentences,
+                    'cr_gzip': cr_gzip,
+                    'cr_xz': cr_xz,
+                    'ngram_scores': ngram_scores,
+                    'overall_ngram': overall_ngram,
+                    'bigram_patterns': bigram_patterns,
+                    'trigram_patterns': trigram_patterns,
+                    'fourgram_patterns': fourgram_patterns,
+                    'pos_tags': pos_tags,
+                    'pos_tuples': pos_tuples,
+                    'homog_score': homog_score,
+                    'homog_measure': homog_measure if run_homogenization else None
+                }
+    
+    if 'diversity_lib_results' in st.session_state:
+        results = st.session_state['diversity_lib_results']
+        sentences = results['sentences']
+        cr_gzip = results['cr_gzip']
+        cr_xz = results['cr_xz']
+        ngram_scores = results['ngram_scores']
+        overall_ngram = results['overall_ngram']
+        bigram_patterns = results['bigram_patterns']
+        trigram_patterns = results['trigram_patterns']
+        fourgram_patterns = results['fourgram_patterns']
+        pos_tags = results['pos_tags']
+        pos_tuples = results['pos_tuples']
+        homog_score = results.get('homog_score')
+        homog_measure = results.get('homog_measure')
+        
+        st.divider()
+        
+        # Sub-tabs for different metrics
+        div_tab1, div_tab2, div_tab3, div_tab4, div_tab5 = st.tabs([
+            "📊 Compression",
+            "📈 N-gram Diversity", 
+            "🔤 Token Patterns",
+            "🏷️ Part-of-Speech",
+            "🔄 Homogenization"
+        ])
+        
+        # --- Compression Tab ---
+        with div_tab1:
+            st.markdown("### Compression Ratio Analysis")
+            st.markdown("""
+            **Compression ratio** measures how compressible the text is.
+            - **Higher ratio** = More repetitive/redundant content
+            - **Lower ratio** = More unique/diverse content
+            """)
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if cr_gzip is not None:
+                    st.metric(
+                        "GZIP Compression Ratio",
+                        f"{cr_gzip:.3f}",
+                        help="Using gzip algorithm (faster, good for general text)"
+                    )
+                    if cr_gzip > 4.0:
+                        st.error("⚠️ Very high compression — text is highly repetitive")
+                    elif cr_gzip > 2.5:
+                        st.warning("⚠️ Moderate compression — some repetitive patterns")
+                    else:
+                        st.success("✅ Low compression — diverse text")
+                else:
+                    st.warning("GZIP compression failed")
+            
+            with col2:
+                if cr_xz is not None:
+                    st.metric(
+                        "XZ Compression Ratio",
+                        f"{cr_xz:.3f}",
+                        help="Using LZMA/XZ algorithm (slower, better compression)"
+                    )
+                else:
+                    st.warning("XZ compression failed")
+            
+            st.divider()
+            st.markdown("**Formula:**")
+            st.latex(r"\text{Compression Ratio} = \frac{\text{Original Size}}{\text{Compressed Size}}")
+            
+            st.info("""
+            **Interpretation Guide:**
+            - Ratio < 2.0: Highly diverse text (hard to compress)
+            - Ratio 2.0-3.0: Moderately diverse
+            - Ratio 3.0-4.0: Some redundancy detected
+            - Ratio > 4.0: Highly repetitive content
+            """)
+        
+        # --- N-gram Diversity Tab ---
+        with div_tab2:
+            st.markdown("### N-gram Diversity Score")
+            st.markdown("""
+            **N-gram diversity** measures the proportion of unique n-grams to total n-grams.
+            Higher scores indicate more varied language patterns.
+            """)
+            
+            # Main metric
+            if overall_ngram is not None:
+                m1, m2, m3 = st.columns(3)
+                with m1:
+                    st.metric(
+                        "Overall N-gram Diversity",
+                        f"{overall_ngram:.3f}",
+                        help="Sum of diversity scores for 1-4 grams"
+                    )
+                with m2:
+                    # Max possible score is 4.0 (1.0 for each n)
+                    diversity_pct = (overall_ngram / 4.0) * 100
+                    st.metric("Diversity %", f"{diversity_pct:.1f}%")
+                with m3:
+                    st.metric("Sentences Analyzed", len(sentences))
+            
+            st.divider()
+            
+            # Individual n-gram scores
+            st.markdown("**Diversity by N-gram Size:**")
+            
+            ngram_data = []
+            for n, score in ngram_scores.items():
+                if score is not None:
+                    ngram_data.append({
+                        'N-gram': f"{n}-gram",
+                        'Score': score,
+                        'Description': {
+                            1: 'Unigrams (single words)',
+                            2: 'Bigrams (word pairs)',
+                            3: 'Trigrams (word triplets)',
+                            4: '4-grams (4-word sequences)'
+                        }.get(n, f'{n}-word sequences')
+                    })
+            
+            if ngram_data:
+                ngram_df = pd.DataFrame(ngram_data)
+                
+                col1, col2 = st.columns([1, 1])
+                
+                with col1:
+                    # Bar chart
+                    fig = px.bar(
+                        ngram_df,
+                        x='N-gram',
+                        y='Score',
+                        color='Score',
+                        color_continuous_scale='Viridis',
+                        title='N-gram Diversity Scores'
+                    )
+                    fig.add_hline(y=1.0, line_dash="dash", line_color="green",
+                                  annotation_text="Perfect diversity (1.0)")
+                    fig.update_layout(height=350)
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                with col2:
+                    st.dataframe(ngram_df, use_container_width=True, hide_index=True)
+                    
+                    st.markdown("""
+                    **Score Interpretation:**
+                    - **1.0** = Every n-gram is unique (maximum diversity)
+                    - **< 0.5** = Significant repetition detected
+                    - **< 0.3** = High repetition (same phrases repeated)
+                    """)
+            
+            st.divider()
+            st.markdown("**Formula:**")
+            st.latex(r"\text{N-gram Diversity} = \sum_{i=1}^{N} \frac{|\text{Unique i-grams}|}{|\text{Total i-grams}|}")
+        
+        # --- Token Patterns Tab ---
+        with div_tab3:
+            st.markdown("### Token Patterns (N-gram Frequency)")
+            st.markdown("""
+            Identifies the **most frequent n-gram patterns** in your text.
+            These reveal repetitive phrases, common expressions, and writing patterns.
+            """)
+            
+            pattern_tabs = st.tabs(["Bigrams (2)", "Trigrams (3)", "4-grams (4)"])
+            
+            with pattern_tabs[0]:
+                if bigram_patterns:
+                    st.markdown("**Top 15 Bigrams (2-word patterns):**")
+                    bigram_df = pd.DataFrame(bigram_patterns, columns=['Pattern', 'Count'])
+                    
+                    col1, col2 = st.columns([2, 1])
+                    with col1:
+                        fig = px.bar(
+                            bigram_df,
+                            x='Count',
+                            y='Pattern',
+                            orientation='h',
+                            title='Most Frequent Bigrams',
+                            color='Count',
+                            color_continuous_scale='Blues'
+                        )
+                        fig.update_layout(height=450, yaxis={'categoryorder': 'total ascending'})
+                        st.plotly_chart(fig, use_container_width=True)
+                    with col2:
+                        st.dataframe(bigram_df, use_container_width=True, hide_index=True)
+                else:
+                    st.info("No significant bigram patterns found.")
+            
+            with pattern_tabs[1]:
+                if trigram_patterns:
+                    st.markdown("**Top 15 Trigrams (3-word patterns):**")
+                    trigram_df = pd.DataFrame(trigram_patterns, columns=['Pattern', 'Count'])
+                    
+                    col1, col2 = st.columns([2, 1])
+                    with col1:
+                        fig = px.bar(
+                            trigram_df,
+                            x='Count',
+                            y='Pattern',
+                            orientation='h',
+                            title='Most Frequent Trigrams',
+                            color='Count',
+                            color_continuous_scale='Greens'
+                        )
+                        fig.update_layout(height=450, yaxis={'categoryorder': 'total ascending'})
+                        st.plotly_chart(fig, use_container_width=True)
+                    with col2:
+                        st.dataframe(trigram_df, use_container_width=True, hide_index=True)
+                else:
+                    st.info("No significant trigram patterns found.")
+            
+            with pattern_tabs[2]:
+                if fourgram_patterns:
+                    st.markdown("**Top 10 4-grams (4-word patterns):**")
+                    fourgram_df = pd.DataFrame(fourgram_patterns, columns=['Pattern', 'Count'])
+                    
+                    col1, col2 = st.columns([2, 1])
+                    with col1:
+                        fig = px.bar(
+                            fourgram_df,
+                            x='Count',
+                            y='Pattern',
+                            orientation='h',
+                            title='Most Frequent 4-grams',
+                            color='Count',
+                            color_continuous_scale='Oranges'
+                        )
+                        fig.update_layout(height=400, yaxis={'categoryorder': 'total ascending'})
+                        st.plotly_chart(fig, use_container_width=True)
+                    with col2:
+                        st.dataframe(fourgram_df, use_container_width=True, hide_index=True)
+                else:
+                    st.info("No significant 4-gram patterns found.")
+        
+        # --- Part-of-Speech Tab ---
+        with div_tab4:
+            st.markdown("### Part-of-Speech Analysis")
+            st.markdown("""
+            Analyze grammatical patterns in your text using Part-of-Speech (POS) tagging.
+            Search for specific grammatical structures to find matching phrases.
+            """)
+            
+            if pos_tuples:
+                st.markdown("**Common POS Tags:**")
+                pos_help = st.expander("📖 POS Tag Reference")
+                with pos_help:
+                    st.markdown("""
+                    | Tag | Description | Example |
+                    |-----|-------------|--------|
+                    | NN | Noun, singular | dog, city |
+                    | NNS | Noun, plural | dogs, cities |
+                    | NNP | Proper noun, singular | John, London |
+                    | VB | Verb, base form | run, eat |
+                    | VBD | Verb, past tense | ran, ate |
+                    | VBG | Verb, gerund | running, eating |
+                    | VBN | Verb, past participle | run, eaten |
+                    | VBZ | Verb, 3rd person singular | runs, eats |
+                    | JJ | Adjective | big, fast |
+                    | RB | Adverb | quickly, very |
+                    | DT | Determiner | the, a, an |
+                    | IN | Preposition | in, on, at |
+                    | CC | Coordinating conjunction | and, but, or |
+                    | PRP | Personal pronoun | I, you, he |
+                    """)
+                
+                st.divider()
+                
+                # Pattern search
+                st.markdown("**🔍 Search for POS Patterns:**")
+                
+                col1, col2 = st.columns([2, 1])
+                with col1:
+                    pattern_input = st.text_input(
+                        "Enter POS pattern (space-separated tags)",
+                        value="JJ NN",
+                        help="Example: 'JJ NN' finds adjective + noun pairs like 'big dog'"
+                    )
+                with col2:
+                    search_pattern = st.button("🔍 Search Pattern", key="search_pos")
+                
+                # Quick pattern buttons
+                st.markdown("**Quick Patterns:**")
+                quick_col1, quick_col2, quick_col3, quick_col4 = st.columns(4)
+                with quick_col1:
+                    if st.button("JJ NN", help="Adjective + Noun"):
+                        pattern_input = "JJ NN"
+                        search_pattern = True
+                with quick_col2:
+                    if st.button("VB NN", help="Verb + Noun"):
+                        pattern_input = "VB NN"
+                        search_pattern = True
+                with quick_col3:
+                    if st.button("DT JJ NN", help="Determiner + Adj + Noun"):
+                        pattern_input = "DT JJ NN"
+                        search_pattern = True
+                with quick_col4:
+                    if st.button("NN IN NN", help="Noun + Prep + Noun"):
+                        pattern_input = "NN IN NN"
+                        search_pattern = True
+                
+                if search_pattern and pattern_input:
+                    with st.spinner(f"Searching for pattern: {pattern_input}"):
+                        matches, _, _ = calculate_pos_patterns(sentences, pattern_input)
+                        
+                        if matches:
+                            st.success(f"Found **{len(matches)}** unique matches for pattern `{pattern_input}`")
+                            
+                            # Display matches
+                            matches_list = list(matches)
+                            match_df = pd.DataFrame({
+                                'Match': matches_list[:50],
+                                'Pattern': [pattern_input] * min(len(matches_list), 50)
+                            })
+                            
+                            col1, col2 = st.columns([1, 1])
+                            with col1:
+                                st.dataframe(match_df, use_container_width=True, hide_index=True)
+                            with col2:
+                                # Word cloud style display
+                                st.markdown("**Sample Matches:**")
+                                for match in matches_list[:20]:
+                                    st.markdown(f"- *{match}*")
+                                if len(matches_list) > 20:
+                                    st.caption(f"... and {len(matches_list) - 20} more")
+                        else:
+                            st.warning(f"No matches found for pattern `{pattern_input}`")
+                
+                st.divider()
+                
+                # Show sample POS tagging
+                st.markdown("**📝 Sample POS Tagging:**")
+                sample_idx = st.slider("Select sentence to view POS tags", 0, min(len(sentences)-1, 9), 0)
+                
+                if sample_idx < len(pos_tuples) and pos_tuples[sample_idx]:
+                    selected_sentence = sentences[sample_idx]
+                    selected_pos = pos_tuples[sample_idx]
+                    
+                    st.markdown(f"**Sentence:** *{selected_sentence}*")
+                    
+                    # Create tagged display
+                    pos_display = []
+                    for word, tag in selected_pos:
+                        pos_display.append({'Word': word, 'POS Tag': tag})
+                    
+                    pos_df = pd.DataFrame(pos_display)
+                    st.dataframe(pos_df.T, use_container_width=True)
+                    
+                    # Visual representation
+                    tagged_html = " ".join([f"**{w}**<sub>_{t}_</sub>" for w, t in selected_pos])
+                    st.markdown(tagged_html)
+            else:
+                st.warning("Part-of-speech analysis not available. Run the analysis first.")
+        
+        # --- Homogenization Tab ---
+        with div_tab5:
+            st.markdown("### Homogenization Score")
+            st.markdown("""
+            **Homogenization Score** measures corpus-level similarity by comparing all pairs of sentences.
+            Based on [Padmakumar & He (2023)](https://arxiv.org/pdf/2309.05196.pdf).
+            
+            - **Higher score** = More homogeneous/similar content across sentences
+            - **Lower score** = More diverse content
+            """)
+            
+            if homog_score is not None:
+                st.divider()
+                
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.metric(
+                        "Homogenization Score",
+                        f"{homog_score:.3f}",
+                        help="Average pairwise similarity across all sentence pairs"
+                    )
+                
+                with col2:
+                    measure_display = {
+                        'rougel': 'ROUGE-L',
+                        'bleu': 'BLEU',
+                        'bertscore': 'BERTScore'
+                    }.get(homog_measure, homog_measure)
+                    st.metric("Similarity Measure", measure_display)
+                
+                with col3:
+                    st.metric("Sentence Pairs", f"{len(sentences) * (len(sentences)-1):,}")
+                
+                st.divider()
+                
+                # Interpretation
+                if homog_score > 0.5:
+                    st.error("""
+                    **⚠️ High Homogenization** — Your text is highly repetitive.
+                    - Sentences share significant content overlap
+                    - Consider diversifying language and topics
+                    """)
+                elif homog_score > 0.3:
+                    st.warning("""
+                    **⚠️ Moderate Homogenization** — Some repetitive patterns detected.
+                    - Some sentences may be paraphrases of each other
+                    - Review for redundant information
+                    """)
+                elif homog_score > 0.15:
+                    st.success("""
+                    **✅ Low Homogenization** — Good diversity in content.
+                    - Sentences cover varied topics
+                    - Limited repetition detected
+                    """)
+                else:
+                    st.success("""
+                    **✅ Very Low Homogenization** — Excellent diversity!
+                    - Sentences are semantically distinct
+                    - Minimal content overlap
+                    """)
+                
+                st.divider()
+                st.markdown("**📖 About Homogenization Score:**")
+                st.markdown("""
+                The homogenization score computes pairwise similarity between all documents/sentences 
+                in a corpus and averages them. It's designed to detect when generated text becomes 
+                too similar or repetitive — a common issue with language models.
+                
+                **Formula:**
+                """)
+                st.latex(r"H = \frac{1}{n} \sum_{i=1}^{n} \frac{1}{n-1} \sum_{j \neq i} sim(d_i, d_j)")
+                
+                st.markdown("""
+                Where $sim(d_i, d_j)$ is the similarity between documents $i$ and $j$ using the chosen metric.
+                """)
+            else:
+                st.info("""
+                **Homogenization score not calculated.**
+                
+                To calculate:
+                1. Expand **Advanced Settings** above
+                2. Check **Calculate Homogenization Score**
+                3. Click **Run Diversity Library Analysis**
+                
+                ⚠️ Note: This is computationally expensive (O(n²) comparisons) and works best with fewer than 50 sentences.
+                """)
+
+# --- TAB 6: Iterative Analysis ---
 with tab_iterative:
     st.subheader("📉 Iterative Analysis (Diminishing Returns)")
     st.markdown("""
