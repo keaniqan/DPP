@@ -10,3 +10,4 @@ rouge-score
 evaluate
 diversity
 spacy
+openai
