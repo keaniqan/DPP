@@ -88,9 +88,18 @@ export class SidebarFile extends LitElement {
     this._showTooltip = false;
   }
 
+  private _onFileClick() {
+    this.dispatchEvent(new CustomEvent("file-selected", {
+      detail: { name: this.name, path: this.path },
+      bubbles: true,
+      composed: true,
+    }));
+  }
+
   render() {
     return html`
         <div class="sidebar-file"
+             @click=${this._onFileClick}
              @mouseenter=${this._onMouseEnter}
              @mouseleave=${this._onMouseLeave}>
             <span class="file-name">${this.name}</span>

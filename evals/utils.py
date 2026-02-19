@@ -320,6 +320,7 @@ def evaluate_all(text):
         "word_frequency": word_freq,
         "total_words": total_words,
         "unique_words": unique_words,
+        "kernel_matrix": kernel_matrix,
         "diversity_compression_ratio": diversity_ratio,
         "ngram_diversity": ngram_diversity,
         "dpp_log_determinant": log_det,

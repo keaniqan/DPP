@@ -4,9 +4,12 @@
   },
   "dependencies": {
     "install": "^0.13.0",
-    "lit": "^3.3.2"
+    "lit": "^3.3.2",
+    "plotly.js-dist": "^3.3.1",
+    "plotly.js-dist-min": "^3.3.1"
   },
   "devDependencies": {
+    "@types/plotly.js": "^3.0.10",
     "typescript": "^5.9.3",
     "vite": "^7.3.1"
   }

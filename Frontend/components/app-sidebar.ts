@@ -119,16 +119,14 @@ export class AppSidebar extends LitElement {
     try {
       const response = await fetch(`${this.apiUrl}/files/`);
       if (!response.ok) throw new Error(`HTTP error: ${response.status}`);
-      
+
       const data = await response.json();
-      console.log('📂 Raw API response:', JSON.stringify(data));  // DEBUG - check the shape
-      
+      console.log('📂 Loaded files from server:', data);
+
       this.all_files = data.files.map((file: any) => ({
-        name: file.filename,  // must match the key from FastAPI
+        name: file.filename,
         path: `uploads/${file.filename}`
       }));
-      
-      console.log('📂 Mapped files:', JSON.stringify(this.all_files));  // DEBUG
     } catch (error) {
       console.error('❌ Failed to load files:', error);
     }
@@ -147,6 +145,7 @@ export class AppSidebar extends LitElement {
     }));
     this.all_files = [...this.all_files, ...newFiles];
   }
+  
   
   render() {
     return html`
